@@ -89,13 +89,15 @@ app.post("/push/:slot", (req, res) => {
   // Forward hero positions
   const heroSent = broadcast(slot, { event: "hero_update", payload: heroes });
 
-  // Forward retri event jika berubah
-  // Kirim retri:1 hanya SEKALI saat transisi 0→1
-  // Kirim retri:0 saat kembali idle
+  // Selalu forward retri:1 ke client (tidak filter perubahan)
+  // retri:0 hanya forward saat transisi 1→0
   let retriSent = 0;
-  if (retri !== prevRetri) {
-    retriSent = broadcast(slot, { event: "retri", payload: retri });
-    console.log(`[RETRI] slot=${slot} retri=${retri} → forwarded to ${retriSent} clients`);
+  if (retri === 1) {
+    retriSent = broadcast(slot, { event: "retri", payload: 1 });
+    console.log(`[RETRI] slot=${slot} retri=1 → forwarded to ${retriSent} clients`);
+  } else if (retri === 0 && prevRetri === 1) {
+    retriSent = broadcast(slot, { event: "retri", payload: 0 });
+    console.log(`[RETRI] slot=${slot} retri=0 (idle) → forwarded to ${retriSent} clients`);
   }
 
   res.json({ ok: true, slot, heroes: heroes.length, retri, heroSent, retriSent });
