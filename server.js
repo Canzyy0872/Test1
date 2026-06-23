@@ -1,15 +1,18 @@
 /**
  * Minimap Relay Server
  *
- * Tugas satu-satunya: terima POST dari C++ mod, forward langsung
- * ke semua Android client yang connect via WebSocket ke slot yang sama.
- * Tidak ada database, tidak ada Supabase, tidak ada library berat.
+ * Terima POST dari C++ mod, forward ke Android client via WebSocket.
  *
  * Endpoint:
- *   POST /push/:slot          ← C++ mod kirim data hero ke sini
- *   GET  /get/:slot           ← Android ambil snapshot awal pas connect
- *   WS   /ws/:slot            ← Android subscribe real-time update
- *   GET  /status              ← health check / debug
+ *   POST /push/:slot  ← C++ mod kirim { "heroes": [...], "retri": 0|1 }
+ *   GET  /get/:slot   ← Android ambil snapshot awal pas connect
+ *   WS   /ws/:slot    ← Android subscribe real-time update
+ *   GET  /status      ← health check / debug
+ *
+ * Event WebSocket yang dikirim ke Android:
+ *   { "event": "hero_update", "payload": [...heroes...] }
+ *   { "event": "retri",       "payload": 1 }   ← hanya saat retri:1
+ *   { "event": "retri",       "payload": 0 }   ← saat kembali idle
  */
 
 const express = require("express");
@@ -22,14 +25,30 @@ const server = http.createServer(app);
 const wss    = new WebSocketServer({ server });
 
 // ─── In-memory store ──────────────────────────────────────────────────────────
-// snapshot[slot] = array of hero objects (last push)
-// clients[slot]  = Set of active WebSocket connections untuk slot itu
-const snapshot = {};   // { 7: [{id,x,y,hp,hpMax}, ...] }
-const clients  = {};   // { 7: Set<WebSocket> }
+// snapshot[slot]    = last heroes array
+// retriState[slot]  = last retri value (0 or 1)
+// clients[slot]     = Set<WebSocket>
+const snapshot   = {};
+const retriState = {};
+const clients    = {};
 
 function getClients(slot) {
   if (!clients[slot]) clients[slot] = new Set();
   return clients[slot];
+}
+
+// ─── Broadcast ke semua client di slot ────────────────────────────────────────
+function broadcast(slot, msg) {
+  const slotClients = getClients(slot);
+  const str = JSON.stringify(msg);
+  let sent = 0;
+  slotClients.forEach((ws) => {
+    if (ws.readyState === OPEN) {
+      ws.send(str);
+      sent++;
+    }
+  });
+  return sent;
 }
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -43,38 +62,55 @@ app.use((req, res, next) => {
 });
 
 // ─── POST /push/:slot ─────────────────────────────────────────────────────────
-// C++ mod kirim array hero ke sini. Server simpan sebagai snapshot,
-// lalu langsung forward ke semua WebSocket client di slot yang sama.
+// C++ mod kirim: { "heroes": [...], "retri": 0|1 }
+// Server:
+//   1. Simpan snapshot heroes
+//   2. Forward hero_update ke semua client
+//   3. Jika retri berubah → forward event retri
 app.post("/push/:slot", (req, res) => {
   const slot = parseInt(req.params.slot, 10);
   if (isNaN(slot)) return res.status(400).json({ ok: false, error: "Invalid slot" });
 
   const data = req.body;
-  if (!Array.isArray(data)) return res.status(400).json({ ok: false, error: "Body must be array" });
 
-  // Simpan snapshot terbaru
-  snapshot[slot] = data;
+  // Validasi format baru: { heroes: [...], retri: 0|1 }
+  if (!data || typeof data !== "object") {
+    return res.status(400).json({ ok: false, error: "Body must be JSON object" });
+  }
 
-  // Forward ke semua client yang subscribe slot ini
-  const slotClients = getClients(slot);
-  const msg = JSON.stringify({ event: "hero_update", payload: data });
-  let sent = 0;
-  slotClients.forEach((ws) => {
-    if (ws.readyState === OPEN) {
-      ws.send(msg);
-      sent++;
-    }
-  });
+  const heroes    = Array.isArray(data.heroes) ? data.heroes : [];
+  const retri     = data.retri === 1 ? 1 : 0;
+  const prevRetri = retriState[slot] ?? 0;
 
-  res.json({ ok: true, slot, count: data.length, forwarded: sent });
+  // Simpan snapshot
+  snapshot[slot]   = heroes;
+  retriState[slot] = retri;
+
+  // Forward hero positions
+  const heroSent = broadcast(slot, { event: "hero_update", payload: heroes });
+
+  // Forward retri event jika berubah
+  // Kirim retri:1 hanya SEKALI saat transisi 0→1
+  // Kirim retri:0 saat kembali idle
+  let retriSent = 0;
+  if (retri !== prevRetri) {
+    retriSent = broadcast(slot, { event: "retri", payload: retri });
+    console.log(`[RETRI] slot=${slot} retri=${retri} → forwarded to ${retriSent} clients`);
+  }
+
+  res.json({ ok: true, slot, heroes: heroes.length, retri, heroSent, retriSent });
 });
 
 // ─── GET /get/:slot ───────────────────────────────────────────────────────────
 // Android ambil snapshot awal sebelum WebSocket connect.
+// Return: { heroes: [...], retri: 0|1 }
 app.get("/get/:slot", (req, res) => {
   const slot = parseInt(req.params.slot, 10);
   if (isNaN(slot)) return res.status(400).json({ ok: false, error: "Invalid slot" });
-  res.json(snapshot[slot] ?? []);
+  res.json({
+    heroes: snapshot[slot] ?? [],
+    retri:  retriState[slot] ?? 0,
+  });
 });
 
 // ─── GET /status ──────────────────────────────────────────────────────────────
@@ -83,36 +119,39 @@ app.get("/status", (req, res) => {
   for (const slot of Object.keys(clients)) {
     info[slot] = {
       connected: getClients(parseInt(slot)).size,
-      heroes: (snapshot[slot] ?? []).length,
+      heroes:    (snapshot[slot] ?? []).length,
+      retri:     retriState[slot] ?? 0,
     };
   }
   res.json({ ok: true, slots: info, uptime: Math.floor(process.uptime()) + "s" });
 });
 
 // ─── WebSocket /ws/:slot ──────────────────────────────────────────────────────
-// Android connect ke ws://host/ws/7 → masuk ke slot 7.
-// Server langsung kirim snapshot terakhir, lalu tetap open untuk terima update.
 wss.on("connection", (ws, req) => {
-  const parsed   = url.parse(req.url);
-  const parts    = parsed.pathname.split("/").filter(Boolean); // ["ws", "7"]
-  const slot     = parseInt(parts[1], 10);
+  const parsed = url.parse(req.url);
+  const parts  = parsed.pathname.split("/").filter(Boolean); // ["ws", "1"]
+  const slot   = parseInt(parts[1], 10);
 
   if (isNaN(slot)) {
     ws.close(1008, "Invalid slot");
     return;
   }
 
-  // Daftarkan client
   const slotClients = getClients(slot);
   slotClients.add(ws);
   console.log(`[WS] Client connect slot=${slot}, total=${slotClients.size}`);
 
-  // Kirim snapshot awal langsung setelah connect
-  if (snapshot[slot] && snapshot[slot].length > 0) {
-    ws.send(JSON.stringify({ event: "hero_update", payload: snapshot[slot] }));
-  }
+  // Kirim snapshot awal: heroes + retri state saat ini
+  const initHeroes = snapshot[slot] ?? [];
+  const initRetri  = retriState[slot] ?? 0;
 
-  // Ping tiap 20 detik biar koneksi nggak di-drop idle oleh hosting
+  if (initHeroes.length > 0) {
+    ws.send(JSON.stringify({ event: "hero_update", payload: initHeroes }));
+  }
+  // Kirim retri state awal agar client tahu kondisi sebelum connect
+  ws.send(JSON.stringify({ event: "retri", payload: initRetri }));
+
+  // Ping tiap 20 detik biar tidak di-drop idle
   const pingInterval = setInterval(() => {
     if (ws.readyState === OPEN) ws.ping();
   }, 20000);
@@ -134,8 +173,8 @@ wss.on("connection", (ws, req) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Minimap Relay running on port ${PORT}`);
-  console.log(`  POST /push/:slot  ← C++ mod`);
-  console.log(`  GET  /get/:slot   ← Android fallback`);
+  console.log(`  POST /push/:slot  ← C++ mod { heroes:[...], retri:0|1 }`);
+  console.log(`  GET  /get/:slot   ← Android snapshot`);
   console.log(`  WS   /ws/:slot    ← Android realtime`);
   console.log(`  GET  /status      ← health check`);
 });
