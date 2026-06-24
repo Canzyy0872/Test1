@@ -77,53 +77,6 @@ app.get("/get/:slot", (req, res) => {
   res.json(snapshot[slot] ?? []);
 });
 
-// ─── retri settings store: { slot: {buff,lord,turtle,litho} } ────────────────
-const retriSettings = {};  // { 1: { buff: true, lord: false, turtle: true, litho: false } }
-
-// ─── POST /retri-settings/:slot ──────────────────────────────────────────────
-// Android kirim flags retri ke sini. C++ GET tiap beberapa detik untuk sync.
-app.post("/retri-settings/:slot", (req, res) => {
-  const slot = parseInt(req.params.slot, 10);
-  if (isNaN(slot)) return res.status(400).json({ ok: false, error: "Invalid slot" });
-
-  const { buff, lord, turtle, litho } = req.body;
-  retriSettings[slot] = {
-    buff:   !!buff,
-    lord:   !!lord,
-    turtle: !!turtle,
-    litho:  !!litho,
-  };
-  res.json({ ok: true, slot, settings: retriSettings[slot] });
-});
-
-// ─── GET /retri-settings/:slot ───────────────────────────────────────────────
-// C++ poll ke sini untuk ambil flags terbaru dari Android.
-app.get("/retri-settings/:slot", (req, res) => {
-  const slot = parseInt(req.params.slot, 10);
-  if (isNaN(slot)) return res.status(400).json({ ok: false, error: "Invalid slot" });
-  res.json(retriSettings[slot] ?? { buff: false, lord: false, turtle: false, litho: false });
-});
-
-// ─── POST /retri/:slot ───────────────────────────────────────────────────────
-// C++ mod kirim signal retri ke sini. Server langsung forward event
-// "retri_signal" ke semua Android client di slot yang sama.
-app.post("/retri/:slot", (req, res) => {
-  const slot = parseInt(req.params.slot, 10);
-  if (isNaN(slot)) return res.status(400).json({ ok: false, error: "Invalid slot" });
-
-  const slotClients = getClients(slot);
-  const msg = JSON.stringify({ event: "retri_signal" });
-  let sent = 0;
-  slotClients.forEach((ws) => {
-    if (ws.readyState === OPEN) {
-      ws.send(msg);
-      sent++;
-    }
-  });
-
-  res.json({ ok: true, slot, forwarded: sent });
-});
-
 // ─── GET /status ──────────────────────────────────────────────────────────────
 app.get("/status", (req, res) => {
   const info = {};
@@ -181,11 +134,8 @@ wss.on("connection", (ws, req) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Minimap Relay running on port ${PORT}`);
-  console.log(`  POST /push/:slot          ← C++ mod (hero data)`);
-  console.log(`  POST /retri/:slot         ← C++ mod (retri signal)`);
-  console.log(`  POST /retri-settings/:slot← Android (set flags)`);
-  console.log(`  GET  /retri-settings/:slot← C++ mod (poll flags)`);
-  console.log(`  GET  /get/:slot           ← Android fallback`);
+  console.log(`  POST /push/:slot  ← C++ mod`);
+  console.log(`  GET  /get/:slot   ← Android fallback`);
   console.log(`  WS   /ws/:slot    ← Android realtime`);
   console.log(`  GET  /status      ← health check`);
 });
