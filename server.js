@@ -5,7 +5,7 @@
  * ke semua Android client yang connect via WebSocket ke slot yang sama.
  * Tidak ada database, tidak ada Supabase, tidak ada library berat.
  *
- * Endpoint:
+ * Endpoint
  *   POST /push/:slot          ← C++ mod kirim data hero ke sini
  *   GET  /get/:slot           ← Android ambil snapshot awal pas connect
  *   WS   /ws/:slot            ← Android subscribe real-time update
