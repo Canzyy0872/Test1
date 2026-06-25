@@ -181,7 +181,7 @@ app.get("/", (req, res) => {
   <div class="card">
     <div class="badge">🌌 Space Evolution</div>
     <div class="logo">DomainBuy</div>
-    <p class="sub">Platform jual-beli domain &amp; layanan digital<br>terpercaya dari Space Evolution.</p>
+    <p class="sub">Minimap Plug-In MLBB<br>by Space Evolution.</p>
 
     <div class="divider"></div>
 
