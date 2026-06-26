@@ -6,7 +6,7 @@
  *   GET  /get/:slot           ← Android snapshot awal
  *   WS   /ws/:slot            ← Android realtime
  *   GET  /config              ← C++ startup fetch (query: ?key=DEVICE_KEY)
- *   GET  /status              ← health check
+ *   GET  /status              ← health chec
  *
  * Bot Commands (hanya owner):
  *   /setslot <key> <slot> <YYYY-MM-DD>   — assign slot + expiry ke device key
