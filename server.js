@@ -6,7 +6,7 @@
  *   GET  /get/:slot           ← Android snapshot awal
  *   WS   /ws/:slot            ← Android realtime
  *   GET  /config              ← C++ startup fetch (query: ?key=DEVICE_KEY)
- *   GET  /status              ← health chec
+ *   GET  /status              ← health check
  *
  * Bot Commands (hanya owner):
  *   /setslot <key> <slot> <YYYY-MM-DD>   — assign slot + expiry ke device key
@@ -247,9 +247,10 @@ wss.on("connection", (ws, req) => {
 });
 
 // ─── Telegram Bot ─────────────────────────────────────────────────────────────
-// Polling sederhana, tanpa library (biar nggak perlu install node-telegram-bot-api)
+// Long-polling robust: SELALU lanjut polling apapun yang terjadi
 
 let lastUpdateId = 0;
+let pollActive   = false;
 
 function tgSend(chatId, text) {
   if (!BOT_TOKEN) return;
@@ -260,34 +261,78 @@ function tgSend(chatId, text) {
     method: "POST",
     headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
   });
-  req.on("error", () => {});
+  req.on("error", (e) => console.error("[BOT] sendMessage error:", e.message));
   req.write(body);
   req.end();
 }
 
 function tgPoll() {
   if (!BOT_TOKEN) return;
+
+  // Timeout request 20 detik (lebih pendek dari Railway idle timeout)
   const req = https.request({
     hostname: "api.telegram.org",
-    path: `/bot${BOT_TOKEN}/getUpdates?timeout=25&offset=${lastUpdateId + 1}`,
-    method: "GET"
+    path: `/bot${BOT_TOKEN}/getUpdates?timeout=15&offset=${lastUpdateId + 1}`,
+    method: "GET",
+    timeout: 20000   // socket timeout
   }, (res) => {
     let raw = "";
     res.on("data", d => raw += d);
     res.on("end", () => {
       try {
         const json = JSON.parse(raw);
-        if (!json.ok || !json.result.length) return;
-        for (const update of json.result) {
-          lastUpdateId = update.update_id;
-          handleMessage(update.message);
+        if (json.ok && json.result && json.result.length > 0) {
+          for (const update of json.result) {
+            lastUpdateId = update.update_id;
+            handleMessage(update.message);
+          }
         }
-      } catch {}
-      tgPoll(); // lanjut polling
+        // ✅ Selalu lanjut, termasuk kalau result kosong atau ok=false
+      } catch (e) {
+        console.error("[BOT] Parse error:", e.message, "raw:", raw.slice(0, 100));
+        // ✅ Tetap lanjut polling walau parse gagal
+      }
+      // Langsung poll lagi tanpa delay
+      setImmediate(tgPoll);
     });
   });
-  req.on("error", () => setTimeout(tgPoll, 5000));
+
+  // Kalau koneksi error / timeout → retry 3 detik
+  req.on("error", (e) => {
+    console.error("[BOT] Poll error:", e.message, "→ retry in 3s");
+    setTimeout(tgPoll, 3000);
+  });
+
+  req.on("timeout", () => {
+    console.warn("[BOT] Poll timeout → abort & retry");
+    req.destroy();
+    // destroy akan trigger event 'error' → retry otomatis
+  });
+
   req.end();
+}
+
+// Watchdog: kalau polling mati entah kenapa, hidupkan lagi tiap 30 detik
+function startBotWatchdog() {
+  setInterval(() => {
+    // Cek apakah polling masih jalan dengan hit /getMe
+    const check = https.request({
+      hostname: "api.telegram.org",
+      path: `/bot${BOT_TOKEN}/getMe`,
+      method: "GET",
+      timeout: 5000
+    }, (res) => {
+      let d = ""; res.on("data", c => d += c);
+      res.on("end", () => {
+        try {
+          const j = JSON.parse(d);
+          if (!j.ok) { console.warn("[BOT] Watchdog: bot token invalid!"); }
+        } catch {}
+      });
+    });
+    check.on("error", () => {});
+    check.end();
+  }, 30000);
 }
 
 function handleMessage(msg) {
@@ -410,9 +455,11 @@ server.listen(PORT, () => {
   console.log(`  GET  /config      ← C++ startup config`);
   console.log(`  GET  /status      ← health check`);
   if (BOT_TOKEN) {
-    console.log(`  Bot Telegram aktif, polling...`);
+    console.log(`  Bot Telegram aktif, mulai polling...`);
     tgPoll();
+    startBotWatchdog();
   } else {
     console.warn("  [BOT] BOT_TOKEN tidak ada di ENV, bot tidak jalan.");
   }
 });
+
