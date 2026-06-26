@@ -1,6 +1,5 @@
 /**
- * Minimap Relay Server (Enhanced with Slot Management)
- *
+ * Minimap Relay Server (Enhanced with Slot Management
  * Tugas satu-satunya: terima POST dari C++ mod, forward langsung
  * ke semua Android client yang connect via WebSocket ke slot yang sama.
  * Sekarang dengan manajemen slot berbasis memori dan dashboard admin.
